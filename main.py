@@ -29,6 +29,26 @@ def chunk_text(text: str, size: int = 4000) -> list[str]:
     return [text[i:i + size] for i in range(0, len(text), size)] or [""]
 
 
+def load_dotenv_file(path: str = ".env") -> None:
+    if not os.path.exists(path):
+        return
+
+    with open(path, "r", encoding="utf-8") as env_file:
+        for raw_line in env_file:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+load_dotenv_file()
+
 BOT_TOKEN = load_env("BOT_TOKEN")
 INSTAGRAM_URL = load_env("INSTAGRAM_URL")
 REQUEST_PARAMS = load_json_env("INSTAGRAM_PARAMS_JSON", '{"count": "12", "hl": "ar"}')

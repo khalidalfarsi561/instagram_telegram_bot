@@ -1,10 +1,12 @@
+import asyncio
 import json
 import os
 import random
-import time
 
-import requests
+import httpx
+import pandas as pd
 import telebot
+from telebot.async_telebot import AsyncTeleBot
 
 
 def load_env(name: str, default: str | None = None) -> str:
@@ -23,10 +25,6 @@ def load_json_env(name: str, default: str = "{}") -> dict:
         return parsed
     except ValueError as exc:
         raise RuntimeError(f"Environment variable {name} must contain valid JSON object") from exc
-
-
-def chunk_text(text: str, size: int = 4000) -> list[str]:
-    return [text[i:i + size] for i in range(0, len(text), size)] or [""]
 
 
 def load_dotenv_file(path: str = ".env") -> None:
@@ -55,89 +53,105 @@ REQUEST_PARAMS = load_json_env("INSTAGRAM_PARAMS_JSON", '{"count": "12", "hl": "
 REQUEST_HEADERS = load_json_env("INSTAGRAM_HEADERS_JSON")
 REQUEST_COOKIES = load_json_env("INSTAGRAM_COOKIES_JSON")
 
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = AsyncTeleBot(BOT_TOKEN)
 
 
 @bot.message_handler(commands=["start"])
-def send_welcome(message):
-    bot.reply_to(
+async def send_welcome(message):
+    await bot.reply_to(
         message,
         "مرحباً بك في البوت 🤖\n"
-        "أرسل أمر /fetch لبدء جلب البيانات.",
+        "أرسل أمر /fetch لبدء جلب البيانات واستخراج ملف Excel.",
     )
 
 
 @bot.message_handler(commands=["fetch"])
-def fetch_instagram_data(message):
-    status_msg = bot.reply_to(message, "🔄 جاري جلب البيانات... انتظر قليلاً.")
+async def fetch_instagram_data(message):
+    status_msg = await bot.reply_to(message, "🔄 جاري جلب البيانات وإنشاء ملف Excel... انتظر قليلاً.")
 
-    session = requests.Session()
     all_users = []
     page_num = 1
     params = dict(REQUEST_PARAMS)
 
-    while True:
-        print(f"🔄 جاري جلب الصفحة رقم {page_num}...")
-        response = session.get(
-            INSTAGRAM_URL,
-            headers=REQUEST_HEADERS,
-            params=params,
-            cookies=REQUEST_COOKIES,
-            timeout=30,
-        )
-
-        if response.status_code == 200:
-            data = response.json()
-            users_in_page = data.get("users", [])
-            all_users.extend(users_in_page)
-
-            print(f"✅ تم جلب {len(users_in_page)} مستخدم في هذه الصفحة. الإجمالي: {len(all_users)}")
-            for user in users_in_page:
-                username = user.get("username")
-                if username:
-                    print(f"   - @{username}")
-
-            has_more = data.get("has_more", False)
-            next_max_id = data.get("next_max_id")
-
-            if has_more and next_max_id:
-                params["max_id"] = str(next_max_id)
-                page_num += 1
-                sleep_time = random.uniform(3.0, 7.0)
-                print(f"⏳ الانتظار لمدة {sleep_time:.2f} ثوانٍ...")
-                time.sleep(sleep_time)
-                print("-" * 40)
-            else:
-                print("🎉 تم جلب جميع البيانات بنجاح!")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        while True:
+            print(f"🔄 جاري جلب الصفحة رقم {page_num}...")
+            try:
+                response = await client.get(
+                    INSTAGRAM_URL,
+                    headers=REQUEST_HEADERS,
+                    params=params,
+                    cookies=REQUEST_COOKIES,
+                )
+            except Exception as e:
+                print(f"❌ خطأ في الاتصال: {e}")
                 break
 
-        elif response.status_code == 429:
-            print("⚠️ تم الوصول إلى حد الطلبات (429).")
-            break
-        else:
-            print(f"❌ فشل الطلب عند الصفحة {page_num}، كود الخطأ: {response.status_code}")
-            print(response.text)
-            break
+            if response.status_code == 200:
+                data = response.json()
+                users_in_page = data.get("users", [])
+                all_users.extend(users_in_page)
 
-    result_lines = [
-        f"🎉 تم جلب البيانات بنجاح!",
-        f"📊 إجمالي العناصر المستخرجة: {len(all_users)}",
-        "",
-        "القائمة:",
-    ]
+                print(f"✅ تم جلب {len(users_in_page)} مستخدم. الإجمالي: {len(all_users)}")
+
+                has_more = data.get("has_more", False)
+                next_max_id = data.get("next_max_id")
+
+                if has_more and next_max_id:
+                    params["max_id"] = str(next_max_id)
+                    page_num += 1
+                    sleep_time = random.uniform(3.0, 7.0)
+                    print(f"⏳ الانتظار غير المتزامن لمدة {sleep_time:.2f} ثوانٍ...")
+                    await asyncio.sleep(sleep_time)
+                    print("-" * 40)
+                else:
+                    print("🎉 تم جلب جميع البيانات بنجاح!")
+                    break
+
+            elif response.status_code == 429:
+                print("⚠️ تم الوصول إلى حد الطلبات (429).")
+                break
+            else:
+                print(f"❌ فشل الطلب، كود الخطأ: {response.status_code}")
+                break
+
+    if not all_users:
+        await bot.edit_message_text(
+            "❌ لم يتم العثور على أي بيانات أو فشلت عملية الجلب.",
+            chat_id=message.chat.id,
+            message_id=status_msg.message_id,
+        )
+        return
+
+    extracted_data = []
     for idx, user in enumerate(all_users, 1):
-        username = user.get("username", "unknown")
-        result_lines.append(f"{idx}. @{username}")
+        extracted_data.append(
+            {
+                "الرقم": idx,
+                "اسم المستخدم (Username)": user.get("username", "unknown"),
+                "الاسم الكامل (Full Name)": user.get("full_name", ""),
+                "معرف الحساب (ID)": user.get("pk", ""),
+            }
+        )
 
-    result_text = "\n".join(result_lines)
+    df = pd.DataFrame(extracted_data)
+    file_path = f"instagram_users_{message.chat.id}.xlsx"
+    df.to_excel(file_path, index=False)
 
-    if len(result_text) > 4000:
-        bot.send_message(message.chat.id, "📄 القائمة طويلة جداً، سيتم تقسيمها:")
-        for part in chunk_text(result_text):
-            bot.send_message(message.chat.id, part)
-    else:
-        bot.edit_message_text(result_text, chat_id=message.chat.id, message_id=status_msg.message_id)
+    await bot.edit_message_text(
+        f"🎉 تم جلب البيانات بنجاح!\n📊 إجمالي العناصر المستخرجة: {len(all_users)}\n📂 جاري إرسال ملف Excel...",
+        chat_id=message.chat.id,
+        message_id=status_msg.message_id,
+    )
+
+    try:
+        with open(file_path, "rb") as excel_file:
+            await bot.send_document(message.chat.id, excel_file, caption="📊 ملف الحسابات المستخرجة")
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
 
-print("⚡ البوت يعمل الآن ومستعد لاستقبال الأوامر...")
-bot.infinity_polling()
+if __name__ == "__main__":
+    print("⚡ البوت المطوّر (Async) يعمل الآن ومستعد لاستقبال الأوامر...")
+    asyncio.run(bot.infinity_polling())
